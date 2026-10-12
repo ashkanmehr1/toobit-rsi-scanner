@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>اسکنر RSI Toobit</title>
+<style>
+:root{color-scheme:dark}
+body{font-family:Tahoma,Arial,sans-serif;background:#0b1220;color:#e5e7eb;margin:0;padding:20px}
+main{max-width:1050px;margin:auto}
+h1{font-size:25px;margin-bottom:8px}
+p{line-height:1.9;color:#b8c3d6}
+.panel{background:#121c2e;border:1px solid #26344d;border-radius:14px;padding:16px;margin:14px 0}
+button{background:#22c55e;color:#052e16;border:0;border-radius:9px;padding:12px 18px;font-weight:bold;cursor:pointer}
+button:disabled{opacity:.55;cursor:wait}
+input,select{background:#0b1220;color:#e5e7eb;border:1px solid #34445f;border-radius:8px;padding:9px}
+.controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.status{padding:10px;border-radius:8px;background:#0b1220;margin-top:12px;white-space:pre-wrap}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th,td{text-align:right;padding:10px;border-bottom:1px solid #26344d}
+th{color:#9fb2ce}
+.buy{color:#4ade80;font-weight:bold}.sell{color:#fb7185;font-weight:bold}
+.small{font-size:12px;color:#8fa1bb}
+a{color:#7dd3fc}
+</style>
+</head>
+<body>
+<main>
+<h1>اسکنر RSI 80 — Toobit Spot</h1>
+<p>عبور RSI از ۴۰ به پایین یا از ۶۰ به بالا را روی کندل‌های یک‌دقیقه‌ای بررسی می‌کند. این نسخه فقط بازار اسپاتِ جفت‌های USDT را بررسی می‌کند.</p>
+<div class="panel">
+  <div class="controls">
+    <label>حداکثر تعداد ارز برای تست:
+      <select id="maxSymbols">
+        <option value="10">۱۰ (تست سریع)</option>
+        <option value="30">۳۰</option>
+        <option value="100">۱۰۰</option>
+        <option value="9999">همه جفت‌های USDT</option>
+      </select>
+    </label>
+    <label>فاصله به‌روزرسانی:
+      <select id="refresh">
+        <option value="60">هر ۶۰ ثانیه</option>
+        <option value="120">هر ۲ دقیقه</option>
+        <option value="300">هر ۵ دقیقه</option>
+      </select>
+    </label>
+    <button id="start">شروع اسکن</button>
+    <button id="stop" disabled>توقف</button>
+  </div>
+  <div id="status" class="status">آماده. برای شروع روی «شروع اسکن» کلیک کن.</div>
+  <div class="small">RSI: 80 • سطوح: 60 و 40 • سیگنال فقط پس از بسته‌شدن کندل ثبت می‌شود.</div>
+</div>
+<div class="panel">
+<h2>سیگنال‌های پیدا شده</h2>
+<table><thead><tr><th>نماد</th><th>سیگنال</th><th>RSI فعلی</th><th>زمان کندل</th></tr></thead><tbody id="results"><tr><td colspan="4">هنوز اسکن شروع نشده.</td></tr></tbody></table>
+</div>
+<p class="small">منبع داده: API عمومی Toobit. این ابزار سفارش معامله ثبت نمی‌کند. اگر مرورگر خطای دسترسی شبکه (CORS) نشان دهد، باید همین فایل را روی یک هاست رایگان مثل GitHub Pages منتشر کنیم.</p>
+<p><a href="https://api-docs.toobit.com/api/spot-market-data" target="_blank" rel="noopener">مستندات رسمی داده‌های بازار Toobit</a></p>
+</main>
+<script>
+const API = "https://api.toobit.com";
+const $ = id => document.getElementById(id);
+let running = false, timer = null, knownSignals = new Set(), lastRows = [];
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+function rsiSeries(closes, period=80) {
+  if (closes.length <= period) return [];
+  let gains=0, losses=0;
+  for(let i=1;i<=period;i++){const d=closes[i]-closes[i-1];gains+=Math.max(d,0);losses+=Math.max(-d,0);}
+  let avgGain=gains/period, avgLoss=losses/period;
+  const out=Array(period).fill(null);
+  out.push(avgLoss===0?100:100-(100/(1+avgGain/avgLoss)));
+  for(let i=period+1;i<closes.length;i++){
+    const d=closes[i]-closes[i-1];
+    avgGain=(avgGain*(period-1)+Math.max(d,0))/period;
+    avgLoss=(avgLoss*(period-1)+Math.max(-d,0))/period;
+    out.push(avgLoss===0?100:100-(100/(1+avgGain/avgLoss)));
+  }
+  return out;
+}
+async function getJson(url){
+  const res=await fetch(url);
+  if(!res.ok) throw new Error("پاسخ API: HTTP "+res.status);
+  return res.json();
+}
+function render(rows){
+  lastRows=rows;
+  const tbody=$("results");
+  if(!rows.length){tbody.innerHTML='<tr><td colspan="4">در این دور سیگنال تازه‌ای پیدا نشد.</td></tr>';return;}
+  tbody.innerHTML=rows.map(r=>`<tr><td dir="ltr">${r.symbol}</td><td class="${r.type==='عبور به بالای ۶۰'?'buy':'sell'}">${r.type}</td><td>${r.rsi.toFixed(2)}</td><td>${r.time}</td></tr>`).join("");
+}
+async function scanOnce(){
+  if(!running)return;
+  $("start").disabled=true;
+  try{
+    $("status").textContent="در حال دریافت فهرست جفت‌ارزها از Toobit…";
+    const info=await getJson(API+"/api/v1/exchangeInfo");
+    let symbols=(info.symbols||[]).filter(s=>s.status==="TRADING" && s.quoteAsset==="USDT").map(s=>s.symbol);
+    const cap=Number($("maxSymbols").value);
+    symbols=symbols.slice(0,cap);
+    const found=[];
+    let done=0;
+    for(let i=0;i<symbols.length;i++){
+      if(!running)break;
+      const symbol=symbols[i];
+      $("status").textContent=`در حال اسکن ${symbol} — ${i+1} از ${symbols.length}\nسیگنال‌ها فقط با بسته‌شدن کندل تأیید می‌شوند.`;
+      try{
+        const candles=await getJson(API+"/quote/v1/klines?symbol="+encodeURIComponent(symbol)+"&interval=1m&limit=100");
+        const closes=candles.map(c=>Number(c[4]));
+        const times=candles.map(c=>Number(c[0]));
+        const rsis=rsiSeries(closes,80);
+        // Ignore the current, still-forming candle; compare the two latest closed candles.
+        const n=rsis.length-2;
+        if(n>0 && rsis[n]!=null && rsis[n-1]!=null){
+          let type=null;
+          if(rsis[n-1]<=60 && rsis[n]>60) type="عبور به بالای ۶۰";
+          if(rsis[n-1]>=40 && rsis[n]<40) type="عبور به پایین ۴۰";
+          if(type){
+            const key=symbol+"|"+times[n]+"|"+type;
+            if(!knownSignals.has(key)){knownSignals.add(key);found.push({symbol,type,rsi:rsis[n],time:new Date(times[n]).toLocaleString("fa-IR")});}
+          }
+        }
+      }catch(e){ /* skip symbols with unavailable data */ }
+      done++;
+      // Keep requests gentle to reduce the chance of rate limits.
+      await wait(180);
+    }
+    if(found.length) render([...found,...lastRows].slice(0,100));
+    $("status").textContent=`تمام شد: ${done} از ${symbols.length} جفت‌ارز بررسی شد.\n${found.length ? found.length+" سیگنال تازه پیدا شد." : "سیگنال تازه‌ای پیدا نشد."}\nزمان آخرین بررسی: ${new Date().toLocaleTimeString("fa-IR")}`;
+  }catch(e){
+    $("status").textContent="خطا در اتصال به API.\n"+e.message+"\nاگر پیام مربوط به CORS یا Failed to fetch دیدی، اشکالی ندارد؛ مرحله بعد فایل را روی هاست رایگان منتشر می‌کنیم.";
+  }finally{
+    $("start").disabled=false;
+  }
+  if(running) timer=setTimeout(scanOnce, Number($("refresh").value)*1000);
+}
+$("start").addEventListener("click",()=>{if(running)return;running=true;$("stop").disabled=false;scanOnce();});
+$("stop").addEventListener("click",()=>{running=false;clearTimeout(timer);$("stop").disabled=true;$("start").disabled=false;$("status").textContent="اسکن متوقف شد.";});
+</script>
+</body>
+</html>
